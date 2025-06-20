@@ -44,7 +44,7 @@ def calculate_new_coords(lat, lon, bearing_degrees, distance_km):
                                    math.cos(distance_km / R) - math.sin(lat_rad) * math.sin(lat2_rad))
 
     new_lat = math.degrees(lat2_rad)
-    new_lon = math.degrees(lon2_rad)
+    new_lon = math.degrees(lon2_rad) 
     return new_lat, new_lon
 
 # --- Yardımcı Fonksiyon: Direnç Kuvvetleri Hesaplama ---
@@ -65,22 +65,52 @@ def calculate_resistances(speed_mps, slope_degrees, mass_kg, drag_coefficient, f
 
     return F_air_resistance, F_rolling_resistance, F_slope
 
+# --- YENİ EKLENDİ: Otobüs Konfigürasyon Sınıfı ---
+class BusConfig:
+    """
+    Belirli bir otobüs modelinin fiziksel ve ana teknik özelliklerini tutar.
+    """
+    def __init__(self,
+                 model_name="TEMSA TS45E",
+                 mass_kg=24494,  # GVWR'ye yakın bir değer (54000 lbs) 
+                 drag_coefficient=0.6,
+                 frontal_area_sqm=7.0,
+                 rolling_resistance_coeff=0.01,
+                 max_motor_power_kw=372, # Broşürden 
+                 motor_efficiency=0.92,
+                 battery_capacity_kwh=560, # Broşürden 
+                 battery_nominal_voltage=650, # Tahmini yüksek voltaj
+                 battery_internal_resistance=0.0005,
+                 charging_rate_kw=150 # Broşürden 
+                 ):
+        self.model_name = model_name
+        self.mass_kg = mass_kg
+        self.drag_coefficient = drag_coefficient
+        self.frontal_area_sqm = frontal_area_sqm
+        self.rolling_resistance_coeff = rolling_resistance_coeff
+        self.max_motor_power_kw = max_motor_power_kw
+        self.motor_efficiency = motor_efficiency
+        self.battery_capacity_kwh = battery_capacity_kwh
+        self.battery_nominal_voltage = battery_nominal_voltage
+        self.battery_internal_resistance = battery_internal_resistance
+        self.charging_rate_kw = charging_rate_kw
+
 
 class ElectricMotor:
-    # TS45E benzeri bir otobüs için motor gücü (önceden 250kW idi, şimdi daha geniş bir aralık düşünelim)
-    def __init__(self, max_power_kw=300, efficiency=0.92, nominal_voltage=650): # <-- Güç ve voltaj artırıldı
-        self.max_power_kw = max_power_kw
-        self.efficiency = efficiency
-        self.nominal_voltage = nominal_voltage
+    def __init__(self, config: BusConfig):
+        self.max_power_kw = config.max_motor_power_kw
+        self.efficiency = config.motor_efficiency
+        self.nominal_voltage = config.battery_nominal_voltage
 
         self.rpm = 0
         self.current = 0 # Amper
-        self.voltage = nominal_voltage # V
+        self.voltage = self.nominal_voltage # V
         self.temperature = 30 # °C
         self.degradation_factor = 1.0 # 1.0 = no degradation, >1.0 means reduced efficiency
+        self.status = "on" # <-- YENİ: Motor durumu ("on", "off")
 
     def calculate_power_and_current(self, required_traction_force_newtons, speed_mps, dt):
-        power_output_watts = required_traction_force_newtons * speed_mps # P = F * v
+        power_output_watts = required_traction_force_newtons * speed_mps
         power_output_kw = power_output_watts / 1000
 
         effective_efficiency = self.efficiency / self.degradation_factor
@@ -88,20 +118,18 @@ class ElectricMotor:
         if power_output_kw > 0: # Çekiş (güç tüketimi)
             self.current = (power_output_kw * 1000) / (self.nominal_voltage * effective_efficiency)
         elif power_output_kw < 0: # Rejeneratif frenleme (güç üretimi)
-            self.current = (power_output_kw * 1000) / (self.nominal_voltage * (1 / effective_efficiency)) # Verim tersine uygulanır
+            self.current = (power_output_kw * 1000) / (self.nominal_voltage * (1 / effective_efficiency))
         else: # Duruyor veya çok düşük hızda
-            self.current = 0 # random.uniform(-0.1, 0.1) gibi küçük boşta akım da olabilir
+            self.current = 0 
 
         max_possible_current = self.max_power_kw * 1000 / self.nominal_voltage
         self.current = np.clip(self.current, -max_possible_current, max_possible_current)
 
-        # RPM: Hızla orantılı (basit model)
-        self.rpm = min(5000, max(0, speed_mps * 30)) # m/s'den RPM'e dönüşüm
+        self.rpm = min(5000, max(0, speed_mps * 30))
 
-        # Motor sıcaklığı: Akım ve kayıp ısı ile artar
-        heat_generated_kw = (abs(self.current) * self.nominal_voltage * (1 - self.efficiency)) / 1000 # kW cinsinden kayıp ısı
+        heat_generated_kw = (abs(self.current) * self.nominal_voltage * (1 - self.efficiency)) / 1000
         self.temperature += (heat_generated_kw * 0.1 - (self.temperature - 30) * 0.05) * dt + random.uniform(-0.05, 0.05)
-        self.temperature = np.clip(self.temperature, 20, 150) # ℃
+        self.temperature = np.clip(self.temperature, 20, 150)
 
         return power_output_kw, self.current
 
@@ -110,37 +138,37 @@ class ElectricMotor:
             "motorRPM": round(apply_noise(self.rpm, "motorRPM")),
             "motorCurrent": round(apply_noise(self.current, "motorCurrent"), 1),
             "motorVoltage": round(apply_noise(self.voltage, "motorVoltage"), 1),
-            "motorTemperature": round(apply_noise(self.temperature, "motorTemperature"), 1)
+            "motorTemperature": round(apply_noise(self.temperature, "motorTemperature"), 1),
+            "motorStatus": self.status # <-- YENİ: Motor durumu eklendi
         }
 
 class Battery:
-    # "Tres 70" model 8 adet batarya paketi varsayımıyla (70 kWh/paket)
-    def __init__(self, capacity_kwh=560, nominal_voltage=650, internal_resistance=0.0005): # <-- Kapasite, voltaj, iç direnç güncellendi
-        self.capacity_kwh = capacity_kwh # 8 adet Tres 70 (70 kWh/adet) = 560 kWh
-        self.nominal_voltage = nominal_voltage # Motorla uyumlu
-        self.internal_resistance = internal_resistance # Büyük paketler için daha düşük iç direnç
+    def __init__(self, config: BusConfig):
+        self.capacity_kwh = config.battery_capacity_kwh
+        self.nominal_voltage = config.battery_nominal_voltage
+        self.internal_resistance = config.battery_internal_resistance
 
-        self.soc = 80 # %
-        self.voltage = nominal_voltage
+        self.soc = 80
+        self.voltage = self.nominal_voltage
         self.current = 0 # Amper (pozitif çekim, negatif şarj)
-        self.temp_min = 25 # °C
-        self.temp_max = 28 # °C
-        self.health = 100 # % (State of Health)
+        self.temp_min = 25
+        self.temp_max = 28
+        self.health = 100
 
         self.battery_capacity_ah = (self.capacity_kwh * 1000) / self.nominal_voltage
 
         self.degradation_factor = 1.0
         self.bms_fault_active = False
 
-    def update(self, total_current_amps, dt): # Şimdi doğrudan toplam akımı alıyor
+    def update(self, total_current_amps, dt):
         self.current = total_current_amps
 
         effective_internal_resistance = self.internal_resistance * self.degradation_factor
         self.voltage = self.nominal_voltage - (self.current * effective_internal_resistance)
         self.voltage = np.clip(self.voltage, self.nominal_voltage * 0.8, self.nominal_voltage * 1.1)
 
-        coulombs_transferred = self.current * dt # Akım (A) * Zaman (s)
-        effective_capacity_ah = self.battery_capacity_ah / self.degradation_factor # Degradation reduces effective capacity
+        coulombs_transferred = self.current * dt
+        effective_capacity_ah = self.battery_capacity_ah / self.degradation_factor
         soc_change_percent = (coulombs_transferred / (effective_capacity_ah * 3600)) * 100
 
         self.soc -= soc_change_percent
@@ -175,7 +203,7 @@ class Driver:
             "normal": {
                 "max_accel_ms2": 1.5,
                 "max_deccel_ms2": 2.5,
-                "reaction_factor": 0.05, # PID'nin tepki hızı
+                "reaction_factor": 0.05,
                 "speed_limit_adherence": 1.0
             },
             "aggressive": {
@@ -266,7 +294,6 @@ class Driver:
                 desired_acceleration_ms2 = error_speed * self.current_profile_params["reaction_factor"]
                 desired_acceleration_ms2 = min(self.current_profile_params["max_accel_ms2"], desired_acceleration_ms2)
                 
-                # Düşük hızlarda kalkış için ekstra itme (0-5 km/s arası)
                 if current_speed_kph < 5 and target_speed_for_driver > 0:
                     desired_acceleration_ms2 = max(desired_acceleration_ms2, self.current_profile_params["max_accel_ms2"] * 0.7)
 
@@ -274,7 +301,6 @@ class Driver:
                 desired_acceleration_ms2 = error_speed * self.current_profile_params["reaction_factor"]
                 desired_acceleration_ms2 = max(-self.current_profile_params["max_deccel_ms2"], desired_acceleration_ms2)
         
-        # Çok küçük, rastgele dalgalanmalar (hızlanmayı sabote etmesin diye)
         desired_acceleration_ms2 += random.uniform(-0.001, 0.001)
 
         return desired_acceleration_ms2
