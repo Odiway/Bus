@@ -68,11 +68,11 @@ temsa_ts45e_config = BusConfig(
     charging_rate_kw=150 # Broşürden
 )
 print(f"Otobüs modeli yapılandırıldı: {temsa_ts45e_config.model_name}")
-print(f"Batarya Kapasitesi: {temsa_ts45e_config.battery_capacity_kwh} kWh, Motor Gücü: {temsa_ts45e_config.max_motor_power_kw} kW") # Kapasite print düzeltildi
+print(f"Batarya Kapasitesi: {temsa_ts45e_config.battery_capacity_kwh} kWh, Motor Gücü: {temsa_ts45e_config.max_motor_power_kw} kW")
 
 # --- SİMÜLASYON NESNELERİNİ BAŞLAT ---
 motor = ElectricMotor(config=temsa_ts45e_config)
-battery = Battery(config=temsa_ts45e_config) # Batarya da BusConfig almalı
+battery = Battery(config=temsa_ts45e_config)
 environment = Environment(initial_temp=25)
 fault_manager = FaultManager()
 
@@ -149,7 +149,7 @@ MIN_STOP_DURATIONS = {
     "stop_traffic_light": 25,    # Trafik ışığı bekleme süresi artırıldı
     "stop_traffic_jam": 90,      # Trafik sıkışıklığı bekleme süresi artırıldı
     "stop_toll_gate": 10,        # 10 saniye gişe
-    "charge_station": 120        # Şarj istasyonunda minimum bekleme süresi (şarj olmasa bile)
+    "charge_station": 1200       # Şarj istasyonunda minimum bekleme süresi (artırıldı: 20 dakika simüle edilmiş)
 }
 
 
@@ -159,7 +159,7 @@ async def handle_command(request):
         command = await request.json()
         print(f"HTTP sunucudan komut alındı: {command}")
 
-        global simulation_start_time # Simülasyon zamanını kullanmak için global yaptık
+        global simulation_start_time 
         
         if command.get("type") == "set_driver_profile":
             driver.set_profile(command.get("profile"))
@@ -177,7 +177,7 @@ async def handle_command(request):
                 intermittent_duration_s=command.get("intermittent_duration_s", 5),
                 details=details,
                 conditions=None,
-                trigger_time_seconds=(datetime.now() - simulation_start_time).total_seconds() + 1 # 1 saniye sonra başlasın
+                trigger_time_seconds=(datetime.now() - simulation_start_time).total_seconds() + 1
             )
             return web.json_response({"status": "ok", "message": f"Fault {fault_type} injected"})
         elif command.get("type") == "clear_faults":
@@ -252,7 +252,7 @@ async def main_simulation_loop():
         driver.set_target_speed(route_manager.current_speed_limit_kph)
         driver.set_traffic_density(route_manager.current_traffic_density)
         
-        action_is_stopping = False # Durma eyleminde olup olmadığını belirten bayrak
+        action_is_stopping = False
         motor_current = 0 # Her adımda motor akımını sıfırla, hareketli durumda hesaplanacak
         regen_brake_power = 0 # Her adımda sıfırla
 
@@ -262,17 +262,17 @@ async def main_simulation_loop():
             driver.set_target_speed(0) # Durması için hedef hız 0
             
             if current_speed_kph > 0.5: # Otobüs yavaşlıyor
-                requested_accel_ms2 = -driver.current_profile_params["max_deccel_ms2"] # Tam frenleme isteği
+                requested_accel_ms2 = -driver.current_profile_params["max_deccel_ms2"]
                 current_speed_mps += requested_accel_ms2 * dt
-                current_speed_mps = np.clip(current_speed_mps, 0, temsa_ts45e_config.max_motor_power_kw / 3.6) # max hız config'den
+                current_speed_mps = np.clip(current_speed_mps, 0, temsa_ts45e_config.max_motor_power_kw / 3.6)
                 current_speed_kph = current_speed_mps * 3.6
                 motor.status = "on" # Yavaşlarken motor hala 'on'
             else: # Otobüs tamamen durdu (hız <= 0.5)
                 current_speed_kph = 0
                 current_speed_mps = 0
-                requested_accel_ms2 = 0 # Durduğu için ivme 0
+                requested_accel_ms2 = 0
                 brake_pedal_active = True
-                motor.status = "off" # <-- Motor KAPALI!
+                motor.status = "off" # Motor KAPALI!
                 
                 stop_timer_seconds += dt # Durma sayacını artır
                 
@@ -288,12 +288,11 @@ async def main_simulation_loop():
                     else: # Batarya doldu
                         charging_status = False
                         print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] >>> Şarj Tamamlandı, SOC: {battery.soc:.1f}% <<<")
-                        stop_timer_seconds = MIN_STOP_DURATIONS[route_manager.current_action] # Durma süresini hemen tamamla (bir sonraki segmente geçmek için)
+                        stop_timer_seconds = MIN_STOP_DURATIONS[route_manager.current_action] # Durma süresini hemen tamamla
                 else: # Şarj istasyonu değilse (dinlenme, trafik vb.)
                     charging_status = False
                 
                 # Batarya güncellemesi: Durma eyleminde motor akımı sıfır, sadece yardımcı yükler ve şarj akımı (eğer varsa)
-                # Bu battery.update, durmuş haldeki her türlü senaryoyu (şarjlı/şarjsız) ele alıyor.
                 battery.update(motor_current + total_aux_current_for_stopping + charging_current_amps, dt)
 
                 # Min bekleme süresi dolduysa bir sonraki segmente geç
@@ -312,7 +311,7 @@ async def main_simulation_loop():
             current_speed_mps = 0
             charging_status = False
             motor.status = "off" # Motor KAPALI
-            motor_current = 0 # Motor akımı sıfır
+            motor_current = 0
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Rota tamamlandı. Simülatör duruyor.")
             # break
         
@@ -338,7 +337,7 @@ async def main_simulation_loop():
             
             F_air_resistance, F_rolling_resistance, F_slope = calculate_resistances(
                 current_speed_mps, route_manager.current_slope_degrees, temsa_ts45e_config.mass_kg, temsa_ts45e_config.drag_coefficient,
-                temsa_ts45e_config.frontal_area_sqm, temsa_ts45e_config.rolling_resistance_coeff, environment.wind_speed_mps
+                temsa_ts45e_config.frontal_area_sqm, temsa_ts45e_config.rolling_resistance_coeff, environment.wind_speed_mps, environment.wind_direction_degrees, route_manager.current_bearing_degrees, environment.weather_condition # <-- YENİ ARGÜMANLAR
             )
 
             F_traction_required_total = (requested_accel_ms2 * temsa_ts45e_config.mass_kg) + F_air_resistance + F_rolling_resistance + F_slope
@@ -373,11 +372,9 @@ async def main_simulation_loop():
         total_aux_power_kw = hvac_power_kw + other_aux_power_kw
         total_aux_current = (total_aux_power_kw * 1000) / battery.nominal_voltage
 
-        # --- 5. Batarya Güncellemesi (Tek Ortak Nokta) ---
-        # Eğer şarj eylemi değilse ve durma eylemi de değilse (yani normal sürüşteyse)
+        # --- 5. Batarya Güncellemesi (Ortak Nokta) ---
         if not action_is_stopping and not charging_status: 
              battery.update(motor_current + total_aux_current, dt)
-        # Diğer durumlar (şarj, durma ama şarj değil) için battery.update zaten ilgili blokların içinde yapıldı.
         
         # --- 6. Sensör Verilerini Birleştirme ---
         bus_data = {

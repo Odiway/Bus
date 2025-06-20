@@ -2,38 +2,42 @@ import numpy as np
 import random
 from datetime import datetime
 import math
+import time # <-- BU SATIR EKLENDİ
 
-# --- Global Sensor Noise Parameters (Sadece get_state() metotlarında uygulanır) ---
+# --- Global Sensor Noise Parameters ---
 DEFAULT_NOISE_STD_DEV = {
     "vehicleSpeed": 0.5, # km/s
-    "motorRPM": 20, # RPM
-    "motorCurrent": 5, # Amper
-    "motorVoltage": 0.5, # Volt
-    "motorTemperature": 0.5, # C
-    "batterySOC": 0.1, # %
-    "batteryVoltage": 0.2, # Volt
-    "batteryCurrent": 3, # Amper
-    "batteryTempMin": 0.3, # C
-    "batteryTempMax": 0.3, # C
-    "batteryHealth": 0.01, # %
-    "auxBatteryVoltage": 0.1, # Volt
-    "cabinTemp": 0.2, # C
-    "ambientTemperature": 0.3, # C
-    "windSpeedMps": 0.5, # m/s
-    "current_slope_degrees": 0.1, # degrees
-    "tirePressure": 0.5, # PSI (new sensor)
-    "latitude": 0.000001, # Enlem için gürültü
-    "longitude": 0.000001 # Boylam için gürültü
+    "motorRPM": 5,   # Kapalıyken daha az gürültü
+    "motorCurrent": 2, # Kapalıyken daha az gürültü
+    "motorVoltage": 0.1, # Kapalıyken daha az gürültü
+    "motorTemperature": 0.5,
+    "batterySOC": 0.1,
+    "batteryVoltage": 0.2,
+    "batteryCurrent": 3,
+    "batteryTempMin": 0.3,
+    "batteryTempMax": 0.3,
+    "batteryHealth": 0.01,
+    "auxBatteryVoltage": 0.1,
+    "cabinTemp": 0.2,
+    "ambientTemperature": 0.3,
+    "windSpeedMps": 0.5,
+    "windDirectionDegrees": 5,
+    "current_slope_degrees": 0.1,
+    "tirePressure": 0.5,
+    "latitude": 0.000001,
+    "longitude": 0.000001
 }
 
 # --- Function to apply noise ---
 def apply_noise(value, sensor_name):
     std_dev = DEFAULT_NOISE_STD_DEV.get(sensor_name, 0)
+    if value == 0 and std_dev > 0 and sensor_name in ["motorRPM", "motorCurrent", "motorVoltage"]:
+        return np.random.normal(0, std_dev * 0.1)
     return value + np.random.normal(0, std_dev)
 
 # --- Yardımcı Fonksiyon: Mesafe ve Yöne Göre Yeni GPS Koordinatları Hesaplama ---
 def calculate_new_coords(lat, lon, bearing_degrees, distance_km):
-    R = 6371 # Dünya'nın ortalama yarıçapı (km)
+    R = 6371
     lat_rad = math.radians(lat)
     lon_rad = math.radians(lon)
     bearing_rad = math.radians(bearing_degrees)
@@ -47,41 +51,48 @@ def calculate_new_coords(lat, lon, bearing_degrees, distance_km):
     new_lon = math.degrees(lon2_rad) 
     return new_lat, new_lon
 
-# --- Yardımcı Fonksiyon: Direnç Kuvvetleri Hesaplama ---
-def calculate_resistances(speed_mps, slope_degrees, mass_kg, drag_coefficient, frontal_area_sqm, rolling_resistance_coeff, wind_speed_mps):
+# --- Yardımcı Fonksiyon: Direnç Kuvvetleri Hesaplama (Rüzgar Yönü ve Yol Koşulu Eklendi) ---
+def calculate_resistances(speed_mps, slope_degrees, mass_kg, drag_coefficient, frontal_area_sqm, rolling_resistance_coeff, wind_speed_mps, wind_direction_degrees, vehicle_bearing_degrees, weather_condition):
     GRAVITY = 9.81
-    air_density = 1.225 # Hava yoğunluğu kg/m^3
+    air_density = 1.225
 
-    # Hava direnci
-    effective_speed_mps_for_air = max(0, speed_mps + wind_speed_mps) # Rüzgar etkisiyle efektif hız
+    angle_diff = abs(vehicle_bearing_degrees - wind_direction_degrees)
+    if angle_diff > 180:
+        angle_diff = 360 - angle_diff
+    
+    headwind_component_factor = math.cos(math.radians(angle_diff))
+    effective_wind_speed = wind_speed_mps * headwind_component_factor
+    
+    effective_speed_mps_for_air = max(0, speed_mps + effective_wind_speed)
     F_air_resistance = 0.5 * air_density * drag_coefficient * frontal_area_sqm * (effective_speed_mps_for_air ** 2)
 
-    # Yuvarlanma direnci
-    F_rolling_resistance = rolling_resistance_coeff * mass_kg * GRAVITY
+    adjusted_rolling_resistance_coeff = rolling_resistance_coeff
+    if weather_condition == "rainy":
+        adjusted_rolling_resistance_coeff *= 1.2
+    elif weather_condition == "snowy":
+        adjusted_rolling_resistance_coeff *= 1.5
 
-    # Yokuş direnci (eğim pozitifse yokuş yukarı)
+    F_rolling_resistance = adjusted_rolling_resistance_coeff * mass_kg * GRAVITY
+
     slope_angle_rad = math.radians(slope_degrees)
     F_slope = mass_kg * GRAVITY * math.sin(slope_angle_rad)
 
     return F_air_resistance, F_rolling_resistance, F_slope
 
-# --- YENİ EKLENDİ: Otobüs Konfigürasyon Sınıfı ---
+# --- Otobüs Konfigürasyon Sınıfı ---
 class BusConfig:
-    """
-    Belirli bir otobüs modelinin fiziksel ve ana teknik özelliklerini tutar.
-    """
     def __init__(self,
                  model_name="TEMSA TS45E",
-                 mass_kg=24494,  # GVWR'ye yakın bir değer (54000 lbs) 
+                 mass_kg=24494,
                  drag_coefficient=0.6,
                  frontal_area_sqm=7.0,
                  rolling_resistance_coeff=0.01,
-                 max_motor_power_kw=372, # Broşürden 
+                 max_motor_power_kw=372,
                  motor_efficiency=0.92,
-                 battery_capacity_kwh=560, # Broşürden 
-                 battery_nominal_voltage=650, # Tahmini yüksek voltaj
+                 battery_capacity_kwh=560,
+                 battery_nominal_voltage=650,
                  battery_internal_resistance=0.0005,
-                 charging_rate_kw=150 # Broşürden 
+                 charging_rate_kw=150
                  ):
         self.model_name = model_name
         self.mass_kg = mass_kg
@@ -103,24 +114,32 @@ class ElectricMotor:
         self.nominal_voltage = config.battery_nominal_voltage
 
         self.rpm = 0
-        self.current = 0 # Amper
-        self.voltage = self.nominal_voltage # V
-        self.temperature = 30 # °C
-        self.degradation_factor = 1.0 # 1.0 = no degradation, >1.0 means reduced efficiency
-        self.status = "on" # <-- YENİ: Motor durumu ("on", "off")
+        self.current = 0
+        self.voltage = self.nominal_voltage
+        self.temperature = 30
+        self.degradation_factor = 1.0
+        self.status = "on"
 
     def calculate_power_and_current(self, required_traction_force_newtons, speed_mps, dt):
+        if self.status == "off":
+            self.current = 0
+            self.rpm = 0
+            power_output_kw = 0
+            self.temperature += -(self.temperature - 30) * 0.05 * dt + random.uniform(-0.05, 0.05)
+            self.temperature = np.clip(self.temperature, 20, 150)
+            return power_output_kw, self.current
+            
         power_output_watts = required_traction_force_newtons * speed_mps
         power_output_kw = power_output_watts / 1000
 
         effective_efficiency = self.efficiency / self.degradation_factor
 
-        if power_output_kw > 0: # Çekiş (güç tüketimi)
+        if power_output_kw > 0:
             self.current = (power_output_kw * 1000) / (self.nominal_voltage * effective_efficiency)
-        elif power_output_kw < 0: # Rejeneratif frenleme (güç üretimi)
+        elif power_output_kw < 0:
             self.current = (power_output_kw * 1000) / (self.nominal_voltage * (1 / effective_efficiency))
-        else: # Duruyor veya çok düşük hızda
-            self.current = 0 
+        else:
+            self.current = 0
 
         max_possible_current = self.max_power_kw * 1000 / self.nominal_voltage
         self.current = np.clip(self.current, -max_possible_current, max_possible_current)
@@ -134,12 +153,21 @@ class ElectricMotor:
         return power_output_kw, self.current
 
     def get_state(self):
+        reported_rpm = self.rpm
+        reported_current = self.current
+        reported_voltage = self.voltage
+
+        if self.status == "off":
+            reported_rpm = 0
+            reported_current = 0
+            reported_voltage = self.nominal_voltage
+
         return {
-            "motorRPM": round(apply_noise(self.rpm, "motorRPM")),
-            "motorCurrent": round(apply_noise(self.current, "motorCurrent"), 1),
-            "motorVoltage": round(apply_noise(self.voltage, "motorVoltage"), 1),
+            "motorRPM": round(apply_noise(reported_rpm, "motorRPM")),
+            "motorCurrent": round(apply_noise(reported_current, "motorCurrent"), 1),
+            "motorVoltage": round(apply_noise(reported_voltage, "motorVoltage"), 1),
             "motorTemperature": round(apply_noise(self.temperature, "motorTemperature"), 1),
-            "motorStatus": self.status # <-- YENİ: Motor durumu eklendi
+            "motorStatus": self.status
         }
 
 class Battery:
@@ -150,7 +178,7 @@ class Battery:
 
         self.soc = 80
         self.voltage = self.nominal_voltage
-        self.current = 0 # Amper (pozitif çekim, negatif şarj)
+        self.current = 0
         self.temp_min = 25
         self.temp_max = 28
         self.health = 100
@@ -195,10 +223,12 @@ class Battery:
         }
 
 class Driver:
-    def __init__(self, profile="normal", target_speed_kph=0):
+    def __init__(self, profile="normal", target_speed_kph=0, reaction_delay_seconds=0.1):
         self.profile = profile
         self.target_speed_kph = target_speed_kph
-        
+        self.reaction_delay_seconds = reaction_delay_seconds
+        self._last_target_speed_change_time = 0
+
         self.profiles = {
             "normal": {
                 "max_accel_ms2": 1.5,
@@ -245,6 +275,8 @@ class Driver:
             self.current_profile_params = self.profiles["normal"]
 
     def set_target_speed(self, new_speed):
+        if new_speed != self.target_speed_kph:
+            self._last_target_speed_change_time = time.perf_counter()
         self.target_speed_kph = new_speed
 
     def set_traffic_density(self, density):
@@ -261,6 +293,12 @@ class Driver:
             if activate: print("Hız Sabitleyici Devre Dışı Bırakıldı.")
 
     def get_desired_acceleration(self, current_speed_kph, dt):
+        time_since_last_target_change = time.perf_counter() - self._last_target_speed_change_time
+        if time_since_last_target_change < self.reaction_delay_seconds:
+            if current_speed_kph < 1 and self.target_speed_kph > 0:
+                return self.current_profile_params["max_accel_ms2"] * 0.1
+            return 0
+
         target_speed_for_driver = self.target_speed_kph
 
         if self.cruise_control_active:
@@ -313,11 +351,12 @@ class Driver:
         }
 
 class Environment:
-    def __init__(self, initial_temp=25, initial_weather="clear", initial_wind_speed=5):
+    def __init__(self, initial_temp=25, initial_weather="clear", initial_wind_speed=5, initial_wind_direction=0):
         self.ambient_temperature = initial_temp
         self.weather_condition = initial_weather
         self.wind_speed_mps = initial_wind_speed
         self.humidity = 60
+        self.wind_direction_degrees = initial_wind_direction
 
     def update(self, dt, current_sim_time_seconds):
         seconds_in_day = 24 * 3600
@@ -334,18 +373,23 @@ class Environment:
         self.ambient_temperature += random.uniform(-0.5, 0.5) * dt
         self.ambient_temperature = np.clip(self.ambient_temperature, -15, 45)
 
-        if random.random() < 0.0001 * dt:
+        if random.random() < 0.000005 * dt:
             self.weather_condition = random.choice(["clear", "rainy", "snowy"])
 
         self.wind_speed_mps += random.uniform(-0.1, 0.1) * dt
         self.wind_speed_mps = np.clip(self.wind_speed_mps, 0, 25)
+
+        self.wind_direction_degrees += random.uniform(-10, 10) * dt
+        self.wind_direction_degrees = self.wind_direction_degrees % 360
+        if self.wind_direction_degrees < 0: self.wind_direction_degrees += 360
 
     def get_state(self):
         return {
             "ambientTemperature": round(apply_noise(self.ambient_temperature, "ambientTemperature"), 1),
             "weatherCondition": self.weather_condition,
             "windSpeedMps": round(apply_noise(self.wind_speed_mps, "windSpeedMps"), 1),
-            "humidity": self.humidity
+            "windDirectionDegrees": round(apply_noise(self.wind_direction_degrees, "windDirectionDegrees"), 1),
+            "humidity": round(apply_noise(self.humidity, "humidity"), 1)
         }
 
 class FaultManager:
@@ -368,12 +412,10 @@ class FaultManager:
         :param intermittent_duration_s: Aralıklı arızanın ne kadar sürdüğü (saniye)
         :param details: Sensör arızaları gibi özel detaylar için (örn: {"sensor": "motorTemperature", "offset": 10})
         """
-        # Sadece aralıklı olmayan arızaları tekrar eklemeyi engelle
         if fault_type in self.triggered_fault_types and not intermittent:
             print(f"Uyarı: '{fault_type}' arızası zaten tanımlı ve tetiklenmiş durumda, tekrar eklenmiyor.")
             return
 
-        # Eğer sensör override arızası ekleniyorsa ve zaten aktifse, tekrar ekleme
         if fault_type.startswith("sensor_") and details and details.get("sensor") in self.sensor_override_faults and not intermittent:
             print(f"Uyarı: '{fault_type}' ({details.get('sensor')}) arızası zaten aktif durumda, tekrar eklenmiyor.")
             return
@@ -411,7 +453,7 @@ class FaultManager:
                 actual_value = current_sim_time_seconds
             elif sensor_name in bus_state:
                 actual_value = bus_state[sensor_name]
-            else: # Eğer sensör bus_state'te yoksa, koşul sağlanamaz
+            else:
                 all_conditions_met = False
                 break
 
@@ -431,9 +473,8 @@ class FaultManager:
         return all_conditions_met
 
     def apply_sensor_overrides(self, bus_state):
-        # Sensör değerlerini doğrudan geçersiz kıl (donma, sıfırlama, ofset)
         for sensor_name, override_info in self.sensor_override_faults.items():
-            if sensor_name in bus_state: # Sadece var olan sensörleri override et
+            if sensor_name in bus_state:
                 if override_info["type"] == "frozen":
                     if "initial_value" not in override_info:
                         override_info["initial_value"] = bus_state[sensor_name]
@@ -442,102 +483,81 @@ class FaultManager:
                     bus_state[sensor_name] = 0
                 elif override_info["type"] == "offset":
                     bus_state[sensor_name] += override_info["value"]
-                elif override_info["type"] == "noisy": # Aşırı gürültü
-                    # Mevcut gürültüye ek olarak daha fazla gürültü uygula
-                    # Normal gürültü + arıza şiddetine bağlı ek gürültü
-                    bus_state[sensor_name] = bus_state[sensor_name] + np.random.normal(0, DEFAULT_NOISE_STD_DEV.get(sensor_name, 0) + override_info["severity"] * 5) # Şiddetle artan gürültü
+                elif override_info["type"] == "noisy":
+                    bus_state[sensor_name] = bus_state[sensor_name] + np.random.normal(0, DEFAULT_NOISE_STD_DEV.get(sensor_name, 0) + override_info["severity"] * 5)
 
 
     def update(self, current_sim_time_seconds, bus_state, dt):
-        # Bu fonksiyon çağrıldığında, varsayılan olarak her şey normal
         current_error_code = None
         current_health_status = "normal_calisma"
 
-        # Yeni arızaları tetikle
         for fault_trigger in self.fault_triggers:
-            if not fault_trigger["active"]: # Sadece henüz aktif olmayanları kontrol et
+            if not fault_trigger["active"]:
                 triggered_by_time = fault_trigger["trigger_time"] is not None and current_sim_time_seconds >= fault_trigger["trigger_time"]
                 triggered_by_conditions = fault_trigger["conditions"] is not None and self._check_conditions(fault_trigger["conditions"], bus_state, current_sim_time_seconds)
 
                 if triggered_by_time or triggered_by_conditions:
                     fault_trigger["active"] = True
-                    # Aralıklı değilse, tetiklenen arıza setine ekle (tekrar tetiklenmemesi için)
                     if not fault_trigger["intermittent"]:
                         self.triggered_fault_types.add(fault_trigger["type"])
                     print(f"--- ARIZA TETİKLENDİ: {fault_trigger['type']} --- (Süre: {round(current_sim_time_seconds)}s, Koşul: {fault_trigger['conditions'] if triggered_by_conditions else 'Zaman'}, Aralıklı: {fault_trigger['intermittent']})")
                     self.active_faults.append(fault_trigger)
-                    if fault_trigger["intermittent"]: # Aralıklı ise, ilk aktifleşme zamanını ve bitişi ayarla
+                    if fault_trigger["intermittent"]:
                         fault_trigger["last_intermittent_trigger"] = current_sim_time_seconds
                         fault_trigger["intermittent_active_until"] = current_sim_time_seconds + fault["intermittent_duration_s"]
                     
-                    # Sensör arızası ise override'a ekle
                     if fault_trigger["type"].startswith("sensor_") and fault_trigger["details"]:
                         self.sensor_override_faults[fault_trigger["details"]["sensor"]] = {
                             "type": fault_trigger["type"].replace("sensor_", ""),
-                            "value": fault_trigger["details"].get("offset"), # Offset için
-                            "severity": fault["severity"], # Noisy için
-                            "initial_value": None # Frozen için
+                            "value": fault_trigger["details"].get("offset"),
+                            "severity": fault["severity"],
+                            "initial_value": None
                         }
 
-        # Aktif arızaları işle ve sensör değerlerini etkile
         faults_to_deactivate = []
-        for fault in list(self.active_faults): # Kopyası üzerinde dön, çünkü listeden eleman çıkarılabilir
+        for fault in list(self.active_faults):
             is_currently_active = True
             if fault["intermittent"]:
-                # Aralıklı arızanın şu an aktif olup olmadığını kontrol et
                 if current_sim_time_seconds < fault["intermittent_active_until"]:
-                    # Şu an aktif (duration içinde)
                     pass
                 elif current_sim_time_seconds >= fault["intermittent_active_until"] and \
                      current_sim_time_seconds < fault["last_intermittent_trigger"] + fault["intermittent_interval_s"]:
-                    # Pasif dönemde
                     is_currently_active = False
-                    # Sensör override'ları için pasifleştiğinde kaldır
                     if fault["type"].startswith("sensor_") and fault["details"] and fault["details"]["sensor"] in self.sensor_override_faults:
                         del self.sensor_override_faults[fault["details"]["sensor"]]
-                        # Frozen sensör için initial_value'yi sıfırla, böylece tekrar aktifleştiğinde güncel değeri dondurur
                         fault["details"]["initial_value"] = None
                 elif current_sim_time_seconds >= fault["last_intermittent_trigger"] + fault["intermittent_interval_s"]:
-                    # Yeni bir döngü için tekrar aktifleşme zamanı geldi
                     is_currently_active = True
                     fault["last_intermittent_trigger"] = current_sim_time_seconds
                     fault["intermittent_active_until"] = current_sim_time_seconds + fault["intermittent_duration_s"]
                     print(f"--- Aralıklı Arıza Yeniden Aktif: {fault['type']} ---")
-                    # Sensör arızası ise override'a tekrar ekle
                     if fault["type"].startswith("sensor_") and fault["details"]:
                         self.sensor_override_faults[fault["details"]["sensor"]] = {
                             "type": fault["type"].replace("sensor_", ""),
                             "value": fault["details"].get("offset"),
                             "severity": fault["severity"],
-                            "initial_value": None # Frozen için
+                            "initial_value": None
                         }
                 else:
-                    is_currently_active = False # Beklenmedik durum, pasif varsay
+                    is_currently_active = False
 
             if not is_currently_active:
-                continue # Bu arıza şu an aktif değil, atla
+                continue
 
-            # Arıza şiddetini artır (sadece aralıklı olmayanlar veya aktif dönemdekiler için)
-            # Aralıklı arızaların şiddeti periyodik olarak sıfırlanabilir veya sabit tutulabilir.
-            # Şimdilik, sadece aktifken artmaya devam etsin.
-            if not fault["intermittent"]: # Sürekli arızalar şiddetini artırır
+            if not fault["intermittent"]:
                 fault["severity"] = min(1.0, fault["severity"] + fault["progression_rate"] * dt)
-            elif fault["intermittent"] and fault["type"].startswith("sensor_noisy"): # Noisy ise şiddeti aktifken artsın
-                fault["severity"] = min(1.0, fault["severity"] + fault["progression_rate"] * dt * 5) # Daha hızlı gürültü artışı
+            elif fault["intermittent"] and fault["type"].startswith("sensor_noisy"):
+                fault["severity"] = min(1.0, fault["severity"] + fault["progression_rate"] * dt * 5)
 
 
-            # --- Arıza Tiplerine Göre Etkiler ---
             if fault["type"] == "battery_overheat":
                 current_health_status = "batarya_sicaklik_problemi"
                 current_error_code = "BMS-T001"
                 
-                # Sıcaklıkları artır
                 bus_state["batteryTempMin"] += fault["severity"] * 0.5 * dt * random.uniform(0.8, 1.2)
                 bus_state["batteryTempMax"] += fault["severity"] * 0.8 * dt * random.uniform(0.8, 1.2)
-                # Sağlığı düşür
                 bus_state["batteryHealth"] = max(0, bus_state["batteryHealth"] - fault["severity"] * 0.0005 * dt)
                 
-                # Aşırı ısınma durumunda enerji kaybı (akım artışı)
                 if bus_state["batteryTempMax"] > 65:
                      bus_state["batteryCurrent"] += abs(bus_state["batteryCurrent"]) * fault["severity"] * 0.05
 
@@ -545,11 +565,8 @@ class FaultManager:
                 current_health_status = "motor_izolasyon_problemi"
                 current_error_code = "MOT-I002"
                 
-                # Verim düşüşü (akım artışı)
                 bus_state["motorCurrent"] *= (1 + fault["severity"] * 0.05)
-                # Sıcaklık artışı
                 bus_state["motorTemperature"] += fault["severity"] * 1.0 * dt * random.uniform(0.9, 1.1)
-                # RPM dalgalanması
                 bus_state["motorRPM"] += random.uniform(-100, 100) * fault["severity"]
                 bus_state["motorRPM"] = max(0, bus_state["motorRPM"])
 
@@ -557,66 +574,42 @@ class FaultManager:
                 current_health_status = "lastik_basinci_dusuk"
                 current_error_code = "TIRE-P001"
                 
-                # Lastik basıncını düşür
-                bus_state["tirePressure"] = max(10, 80 - fault["severity"] * 70) # 80 PSI'dan 10 PSI'a kadar düşebilir
+                bus_state["tirePressure"] = max(10, 80 - fault["severity"] * 70)
                 
-                # Enerji tüketimini artır (sürtünme)
                 bus_state["batteryCurrent"] += abs(bus_state["batteryCurrent"]) * fault["severity"] * 0.02
-                # Hızda ufak dalgalanmalar
                 bus_state["vehicleSpeed"] += random.uniform(-0.5, 0.5) * fault["severity"]
 
             elif fault["type"] == "coolant_pump_failure":
                 current_health_status = "sogutma_pompasi_arizasi"
                 current_error_code = "COOL-P001"
                 
-                # Motor ve batarya sıcaklıklarını hızla artır
                 bus_state["motorTemperature"] += fault["severity"] * 5.0 * dt * random.uniform(0.8, 1.2)
                 bus_state["batteryTempMax"] += fault["severity"] * 3.0 * dt * random.uniform(0.8, 1.2)
                 bus_state["batteryTempMin"] += fault["severity"] * 3.0 * dt * random.uniform(0.8, 1.2)
-                # Soğutma suyu sıcaklığı da artar
-                bus_state["coolantTemp"] = bus_state["motorTemperature"] # Basit model
+                bus_state["coolantTemp"] = bus_state["motorTemperature"]
                 
-                # Kritik sıcaklığa ulaşınca motor gücünü kısıtla
                 if bus_state["motorTemperature"] > 140 or bus_state["batteryTempMax"] > 65:
-                    bus_state["motorCurrent"] *= (1 - fault["severity"] * 0.3) # Motor gücü %30'a kadar düşebilir
+                    bus_state["motorCurrent"] *= (1 - fault["severity"] * 0.3)
 
             elif fault["type"] == "aux_battery_degradation":
                 current_health_status = "yardimci_aku_performans_dusuk"
                 current_error_code = "AUX-B001"
                 
-                # Yardımcı akü voltajını düşür
-                bus_state["auxBatteryVoltage"] = max(18.0, 24.0 - fault["severity"] * 6.0) # 24V'tan 18V'a düşebilir
+                bus_state["auxBatteryVoltage"] = max(18.0, 24.0 - fault["severity"] * 6.0)
 
             elif fault["type"] == "sensor_frozen":
-                # Sensör değeri apply_sensor_overrides tarafından dondurulacak
                 current_health_status = f"{fault['details']['sensor']}_sensor_frozen"
                 current_error_code = "SENSOR-F001"
 
             elif fault["type"] == "sensor_offset":
-                # Sensör değeri apply_sensor_overrides tarafından ofsetlenecek
                 current_health_status = f"{fault['details']['sensor']}_sensor_offset"
                 current_error_code = "SENSOR-O002"
 
             elif fault["type"] == "sensor_noisy":
-                # Sensör değeri apply_sensor_overrides tarafından gürültülü hale getirilecek
                 current_health_status = f"{fault['details']['sensor']}_sensor_noisy"
                 current_error_code = "SENSOR-N003"
             
-            # TODO: Diğer arıza tiplerini buraya ekle (örn: fren balatası aşınması, şanzıman arızası)
-
-
-        # Arıza durumunda genel sağlık durumunu ve hata kodunu güncelle.
-        # Birden fazla aktif arıza varsa, en yüksek şiddetli olanın sağlık durumunu veya önceliklendirilmiş olanı seçebiliriz.
-        # Şimdilik, sadece son işlenen arızanın durumunu tutacağız. Bu kısım daha sonra geliştirilebilir.
-        # Eğer aktif arıza varsa ve sağlık durumu normal olarak ayarlanmamışsa, onu koru.
-        # Aksi takdirde, en yüksek öncelikli veya son aktif arızanın durumunu ayarla.
-        # Basitlik adına, şu anda döngüdeki son etkili arızanın durumunu tutacağız.
-
-        # Sensör override'larını her zaman uygula (arızalar aktifse)
         self.apply_sensor_overrides(bus_state)
-
-        # Arızalar giderildiğinde (örneğin dashboard'dan bir komutla) buradan kaldırılması gerekir.
-        # Bunun için 'clear_faults' komutu eklendi.
 
         return current_health_status, current_error_code
 
@@ -626,11 +619,9 @@ class RouteManager:
         self.current_segment_index = 0
         self.distance_in_current_segment_km = 0.0
         
-        # GPS koordinatlarını başlat (Adana merkez, Adana, Türkiye)
-        # 37.0000° N, 35.3250° E
         self.current_latitude = 37.0000
         self.current_longitude = 35.3250
-        self.current_bearing_degrees = 330 # Yaklaşık Adana'dan İstanbul'a (Kuzeybatı)
+        self.current_bearing_degrees = 330
 
         self.current_slope_degrees = 0.0
         self.current_speed_limit_kph = 0
@@ -647,7 +638,6 @@ class RouteManager:
             self.current_speed_limit_kph = segment.get("speed_limit_kph", 0)
             self.current_traffic_density = segment.get("traffic_density", "low")
             self.current_action = segment.get("action", "drive")
-            # Segment değişiminde yönü güncelle (initial_bearing varsa)
             if "initial_bearing" in segment:
                 self.current_bearing_degrees = segment["initial_bearing"]
             
@@ -658,8 +648,6 @@ class RouteManager:
             self.current_action = "end_of_route"
             
     def update(self, distance_traveled_dt_km):
-        # Toplam katedilen mesafeye göre yeni GPS koordinatlarını hesapla
-        # Her küçük dt adımında hareket
         if distance_traveled_dt_km > 0:
             self.current_latitude, self.current_longitude = calculate_new_coords(
                 self.current_latitude, self.current_longitude,
@@ -675,7 +663,7 @@ class RouteManager:
                 self.current_segment_index += 1
                 self._update_current_segment_info()
                 print(f"--- Rota Segmenti Değişti --- Yeni Segment: Index {self.current_segment_index}, Eğim: {self.current_slope_degrees}°,"
-                      f" Hız Limiti: {self.current_speed_limit_kph} km/s, Aksiyon: {self.current_action}, Yön: {self.current_bearing_degrees}°") # Yön de eklendi
+                      f" Hız Limiti: {self.current_speed_limit_kph} km/s, Aksiyon: {self.current_action}, Yön: {self.current_bearing_degrees}°")
         
         return self.get_state()
 
@@ -687,7 +675,7 @@ class RouteManager:
             "current_route_action": self.current_action,
             "current_segment_index": self.current_segment_index,
             "distance_in_current_segment_km": round(self.distance_in_current_segment_km, 2),
-            "latitude": round(apply_noise(self.current_latitude, "latitude"), 6), # GPS hassasiyeti
-            "longitude": round(apply_noise(self.current_longitude, "longitude"), 6), # GPS hassasiyeti
-            "bearing_degrees": round(self.current_bearing_degrees, 1)
+            "latitude": round(apply_noise(self.current_latitude, "latitude"), 6),
+            "longitude": round(apply_noise(self.current_longitude, "longitude"), 6),
+            "bearing_degrees": round(apply_noise(self.current_bearing_degrees, "bearing_degrees"), 1)
         }
